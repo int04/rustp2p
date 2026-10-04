@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::{TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -27,6 +27,7 @@ pub struct ViewerHandle {
     pub remote_w: u32,
     pub remote_h: u32,
     pub stop: Arc<AtomicBool>,
+    pub status: Arc<Mutex<String>>,
 }
 
 /// Connects + handshakes synchronously, then spawns decode pipeline threads.
@@ -70,6 +71,7 @@ pub fn spawn_threads(
         .context("clear handshake timeout")?;
 
     let stop = Arc::new(AtomicBool::new(false));
+    let status = Arc::new(Mutex::new(format!("Connected · waiting for {} decoder…", backend.label())));
 
     // Channel: assembled NAL data → decoder
     let (nal_tx, nal_rx) = bounded::<Vec<u8>>(4);
@@ -104,15 +106,21 @@ pub fn spawn_threads(
     // so construct and drive the decoder on this worker thread.
     {
         let stop = stop.clone();
+        let status2 = status.clone();
         let frame_tx2 = frame_tx;
         let ctx2 = ctx.clone();
         std::thread::Builder::new()
             .name("decoder".into())
             .spawn(move || {
                 let mut decoder = match VideoDecoder::new(backend, fps) {
-                    Ok(d) => d,
+                    Ok(d) => {
+                        *status2.lock().unwrap() = format!("{} decoder ready · waiting for video…", backend.label());
+                        d
+                    }
                     Err(e) => {
-                        warn!("Decoder init: {e:#}");
+                        let msg = format!("Decoder init failed: {e:#}");
+                        *status2.lock().unwrap() = msg.clone();
+                        warn!("{msg}");
                         return;
                     }
                 };
@@ -123,6 +131,7 @@ pub fn spawn_threads(
                     match nal_rx.recv_timeout(Duration::from_millis(100)) {
                         Ok(nal) => match decoder.decode(&nal) {
                             Ok(Some((data, w, h))) => {
+                                *status2.lock().unwrap() = format!("Streaming · {} decoder", backend.label());
                                 frame_tx2
                                     .try_send(RgbaFrame {
                                         data,
@@ -133,7 +142,11 @@ pub fn spawn_threads(
                                 ctx2.request_repaint();
                             }
                             Ok(None) => {}
-                            Err(e) => warn!("Decode error: {e}"),
+                            Err(e) => {
+                                let msg = format!("Decode error: {e:#}");
+                                *status2.lock().unwrap() = msg.clone();
+                                warn!("{msg}");
+                            }
                         },
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                         Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -182,6 +195,7 @@ pub fn spawn_threads(
         remote_w,
         remote_h,
         stop,
+        status,
     })
 }
 
@@ -325,7 +339,8 @@ impl eframe::App for ViewerWindow {
                     self.screen_rect = crate::gui::paint_remote(ui, tex);
                 } else {
                     ui.centered_and_justified(|ui| {
-                        ui.label(egui::RichText::new("Connecting…").color(egui::Color32::WHITE));
+                        let status = self.handle.status.lock().unwrap().clone();
+                        ui.label(egui::RichText::new(status).color(egui::Color32::WHITE));
                     });
                 }
             });

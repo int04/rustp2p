@@ -593,7 +593,8 @@ fn render_one_session(ctx: &egui::Context, s: &mut Session) -> bool {
                     s.screen_rect = paint_remote(ui, tex);
                 } else {
                     ui.centered_and_justified(|ui| {
-                        ui.label(egui::RichText::new("Connecting…").color(egui::Color32::WHITE));
+                        let status = s.handle.status.lock().unwrap().clone();
+                        ui.label(egui::RichText::new(status).color(egui::Color32::WHITE));
                     });
                 }
             });
