@@ -141,7 +141,12 @@ pub fn spawn_threads(
                                     .ok();
                                 ctx2.request_repaint();
                             }
-                            Ok(None) => {}
+                            Ok(None) => {
+                                if let Some(detail) = decoder.backend_status() {
+                                    *status2.lock().unwrap() =
+                                        format!("GPU decoder · {detail} · waiting for frame…");
+                                }
+                            }
                             Err(e) => {
                                 let msg = format!("Decode error: {e:#}");
                                 *status2.lock().unwrap() = msg.clone();

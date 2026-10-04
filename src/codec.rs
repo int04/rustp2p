@@ -289,6 +289,14 @@ impl VideoDecoder {
             VideoDecoderInner::Gpu(dec) => dec.decode(nal),
         }
     }
+
+    pub fn backend_status(&self) -> Option<&str> {
+        match &self.inner {
+            VideoDecoderInner::Cpu(_) => None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            VideoDecoderInner::Gpu(dec) => Some(&dec.last_outcome),
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -296,6 +304,7 @@ struct HardwareVideoDecoder {
     dec: openipc_video::PlatformDecoder,
     timestamp: i64,
     timestamp_step: i64,
+    last_outcome: String,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -324,6 +333,7 @@ impl HardwareVideoDecoder {
             dec,
             timestamp: 0,
             timestamp_step,
+            last_outcome: "initialized".to_string(),
         })
     }
 
@@ -334,9 +344,10 @@ impl HardwareVideoDecoder {
             .ok_or_else(|| anyhow::anyhow!("invalid hardware decoder timestamp"))?;
         self.timestamp = self.timestamp.wrapping_add(self.timestamp_step);
         let access = EncodedAccessUnit::new(VideoCodec::H264, nal.to_vec(), timestamp, false);
-        self.dec
+        let outcome = self.dec
             .submit(access)
             .context("hardware H.264 decode submit")?;
+        self.last_outcome = format!("{outcome:?}");
 
         let Some(frame) = self.dec.latest_frame() else {
             return Ok(None);
