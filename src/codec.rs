@@ -538,6 +538,58 @@ fn nv12_to_rgba(
     height: usize,
     full_range: bool,
 ) -> Vec<u8> {
+    use yuvutils_rs::{
+        yuv_nv12_to_rgba, YuvBiPlanarImage, YuvConversionMode, YuvRange,
+        YuvStandardMatrix,
+    };
+
+    let mut rgba = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
+    let image = YuvBiPlanarImage {
+        y_plane,
+        y_stride: y_stride as u32,
+        uv_plane,
+        uv_stride: uv_stride as u32,
+        width: width as u32,
+        height: height as u32,
+    };
+    let range = if full_range {
+        YuvRange::Full
+    } else {
+        YuvRange::Limited
+    };
+
+    if let Err(e) = yuv_nv12_to_rgba(
+        &image,
+        &mut rgba,
+        (width * 4) as u32,
+        range,
+        YuvStandardMatrix::Bt709,
+        YuvConversionMode::Fast,
+    ) {
+        tracing::warn!("SIMD NV12->RGBA conversion failed: {e}; falling back to scalar");
+        return nv12_to_rgba_scalar(
+            y_plane,
+            y_stride,
+            uv_plane,
+            uv_stride,
+            width,
+            height,
+            full_range,
+        );
+    }
+    rgba
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn nv12_to_rgba_scalar(
+    y_plane: &[u8],
+    y_stride: usize,
+    uv_plane: &[u8],
+    uv_stride: usize,
+    width: usize,
+    height: usize,
+    full_range: bool,
+) -> Vec<u8> {
     let mut rgba = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
     for y in 0..height {
         for x in 0..width {

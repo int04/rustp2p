@@ -47,6 +47,8 @@ eframe = "0.34"
 # Fast inter-thread channels
 crossbeam-channel = "0.5"
 socket2 = "0.5"
+# SIMD NV12->RGBA conversion (AVX/SSE on Windows) for low-latency GPU decode display.
+yuvutils-rs = { version = "0.8.3", features = ["fast_mode"] }
 
 # Encryption: password KDF + AEAD for control channel and video stream
 argon2 = "0.5"

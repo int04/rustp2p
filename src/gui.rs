@@ -18,6 +18,14 @@ pub fn run() -> Result<()> {
             .with_inner_size([460.0, 440.0])
             .with_min_inner_size([380.0, 360.0])
             .with_icon(std::sync::Arc::new(load_icon())),
+        // Keep a single frame queued for presentation. This preserves tear-free
+        // vsync while avoiding the extra 1-2 frames of latency from the default.
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            present_mode: eframe::wgpu::PresentMode::AutoVsync,
+            desired_maximum_frame_latency: Some(1),
+            ..Default::default()
+        },
+        dithering: false,
         ..Default::default()
     };
 

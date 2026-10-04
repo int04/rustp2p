@@ -85,10 +85,13 @@ pub fn spawn_threads(
     let stop = Arc::new(AtomicBool::new(false));
     let status = Arc::new(Mutex::new(format!("Connected · waiting for {} decoder…", backend.label())));
 
-    // Channel: assembled NAL data → decoder
-    let (nal_tx, nal_rx) = bounded::<Vec<u8>>(4);
-    // Channel: decoded RGBA frames → GUI
-    let (frame_tx, frame_rx) = bounded::<RgbaFrame>(2);
+    // Low-latency queues: keep at most one pending compressed frame and one
+    // decoded frame. If either consumer lags, replace stale work with the newest
+    // frame instead of building latency.
+    let (nal_tx, nal_rx) = bounded::<Vec<u8>>(1);
+    let nal_drop_rx = nal_rx.clone();
+    let (frame_tx, frame_rx) = bounded::<RgbaFrame>(1);
+    let frame_drop_rx = frame_rx.clone();
 
     // UDP receiver thread — decrypts datagrams, assembles chunks into complete NALs
     {
@@ -98,7 +101,7 @@ pub fn spawn_threads(
             .name("udp-recv".into())
             .spawn({
                 let status = status.clone();
-                move || udp_receiver(udp_sock, cipher, nal_tx, stop, status)
+                move || udp_receiver(udp_sock, cipher, nal_tx, nal_drop_rx, stop, status)
             })?;
     }
 
@@ -123,6 +126,7 @@ pub fn spawn_threads(
         let stop = stop.clone();
         let status2 = status.clone();
         let frame_tx2 = frame_tx;
+        let frame_drop_rx2 = frame_drop_rx;
         let ctx2 = ctx.clone();
         std::thread::Builder::new()
             .name("decoder".into())
@@ -156,13 +160,21 @@ pub fn spawn_threads(
                             match decoder.decode(&nal) {
                             Ok(Some((data, w, h))) => {
                                 *status2.lock().unwrap() = format!("Streaming · {} decoder", backend.label());
-                                frame_tx2
-                                    .try_send(RgbaFrame {
-                                        data,
-                                        width: w,
-                                        height: h,
-                                    })
-                                    .ok();
+                                let newest = RgbaFrame {
+                                    data,
+                                    width: w,
+                                    height: h,
+                                };
+                                match frame_tx2.try_send(newest) {
+                                    Ok(()) => {}
+                                    Err(crossbeam_channel::TrySendError::Full(newest)) => {
+                                        // Drop the stale frame already waiting for the UI, then
+                                        // publish the newest decoded frame.
+                                        let _ = frame_drop_rx2.try_recv();
+                                        let _ = frame_tx2.try_send(newest);
+                                    }
+                                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
+                                }
                                 ctx2.request_repaint();
                             }
                             Ok(None) => {
@@ -235,6 +247,7 @@ fn udp_receiver(
     sock: UdpSocket,
     cipher: Cipher,
     nal_tx: Sender<Vec<u8>>,
+    nal_drop_rx: Receiver<Vec<u8>>,
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<String>>,
 ) {
@@ -324,7 +337,16 @@ fn udp_receiver(
             *status.lock().unwrap() = format!(
                 "UDP packets {packet_count} · complete frames {complete_count}"
             );
-            nal_tx.try_send(assembled).ok();
+            match nal_tx.try_send(assembled) {
+                Ok(()) => {}
+                Err(crossbeam_channel::TrySendError::Full(newest)) => {
+                    // Decoder is behind: discard one stale compressed frame and
+                    // decode the newest complete access unit instead.
+                    let _ = nal_drop_rx.try_recv();
+                    let _ = nal_tx.try_send(newest);
+                }
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => return,
+            }
 
             // Evict frames that are far behind the newest completed frame while
             // preserving newer in-flight frames.
@@ -344,6 +366,12 @@ pub fn run(host: &str, port: u16, password: &str, backend: VideoBackend) -> Resu
             .with_title("Rust P2P Viewer")
             .with_inner_size([1280.0, 720.0])
             .with_resizable(true),
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            present_mode: eframe::wgpu::PresentMode::AutoVsync,
+            desired_maximum_frame_latency: Some(1),
+            ..Default::default()
+        },
+        dithering: false,
         ..Default::default()
     };
 
