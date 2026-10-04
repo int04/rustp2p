@@ -84,7 +84,10 @@ pub fn spawn_threads(
         let cipher = cipher.clone();
         std::thread::Builder::new()
             .name("udp-recv".into())
-            .spawn(move || udp_receiver(udp_sock, cipher, nal_tx, stop))?;
+            .spawn({
+                let status = status.clone();
+                move || udp_receiver(udp_sock, cipher, nal_tx, stop, status)
+            })?;
     }
 
     #[cfg(target_os = "windows")]
@@ -211,7 +214,13 @@ pub fn spawn_threads(
 }
 
 /// Receive UDP datagrams, decrypt them, reassemble chunks into complete H.264 NALs
-fn udp_receiver(sock: UdpSocket, cipher: Cipher, nal_tx: Sender<Vec<u8>>, stop: Arc<AtomicBool>) {
+fn udp_receiver(
+    sock: UdpSocket,
+    cipher: Cipher,
+    nal_tx: Sender<Vec<u8>>,
+    stop: Arc<AtomicBool>,
+    status: Arc<Mutex<String>>,
+) {
     sock.set_read_timeout(Some(Duration::from_millis(200))).ok();
     let local_port = sock.local_addr().map(|a| a.port()).unwrap_or(0);
     info!("UDP video receiver on port {local_port}");
@@ -220,6 +229,8 @@ fn udp_receiver(sock: UdpSocket, cipher: Cipher, nal_tx: Sender<Vec<u8>>, stop: 
     let mut pending: HashMap<u32, (u16, HashMap<u16, Vec<u8>>)> = HashMap::new();
     let mut buf = vec![0u8; 65536];
     let mut last_seen_id: u32 = 0;
+    let mut packet_count: u64 = 0;
+    let mut complete_count: u64 = 0;
 
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -248,9 +259,18 @@ fn udp_receiver(sock: UdpSocket, cipher: Cipher, nal_tx: Sender<Vec<u8>>, stop: 
             continue;
         };
 
-        // Drop frames we've already passed
-        if pkt.frame_id.wrapping_sub(last_seen_id) > 60 {
-            continue;
+        packet_count = packet_count.saturating_add(1);
+        if packet_count == 1 || packet_count % 500 == 0 {
+            *status.lock().unwrap() = format!(
+                "UDP packets {packet_count} · complete frames {complete_count} · pending {}",
+                pending.len()
+            );
+        }
+
+        // Never permanently reject a stream just because early fragmented frames
+        // were incomplete. Keep only a small moving window of recent frame IDs.
+        if pending.len() >= 32 && !pending.contains_key(&pkt.frame_id) {
+            pending.retain(|&id, _| pkt.frame_id.wrapping_sub(id) < 32);
         }
 
         let entry = pending
@@ -270,10 +290,17 @@ fn udp_receiver(sock: UdpSocket, cipher: Cipher, nal_tx: Sender<Vec<u8>>, stop: 
                 }
             }
             last_seen_id = pkt.frame_id;
+            complete_count = complete_count.saturating_add(1);
+            *status.lock().unwrap() = format!(
+                "UDP packets {packet_count} · complete frames {complete_count}"
+            );
             nal_tx.try_send(assembled).ok();
 
-            // Evict any stale pending frames older than this one
-            pending.retain(|&id, _| id.wrapping_sub(last_seen_id) < 120);
+            // Evict frames that are far behind the newest completed frame while
+            // preserving newer in-flight frames.
+            pending.retain(|&id, _| {
+                id == last_seen_id || id.wrapping_sub(last_seen_id) < 32
+            });
         }
     }
 }
