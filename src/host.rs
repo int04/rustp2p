@@ -247,8 +247,14 @@ mod imp {
         info!("Screen size {width}×{height}, streaming at {fps} fps / {bitrate_mbps} Mbps / {}", backend.label());
 
         let session_stop = Arc::new(AtomicBool::new(false));
-        let (frame_tx, frame_rx) = bounded::<Vec<u8>>(2);
-        let (nal_tx, nal_rx) = bounded::<Vec<u8>>(4);
+        // Keep only the newest raw capture waiting for the encoder. If encoding
+        // falls behind, stale screen frames are useless and only add latency.
+        let (frame_tx, frame_rx) = bounded::<Vec<u8>>(1);
+        let frame_drop_rx = frame_rx.clone();
+        // Encoded frames must stay ordered because H.264 P-frames depend on prior
+        // references. A single-slot queue provides backpressure without a deep
+        // latency buffer.
+        let (nal_tx, nal_rx) = bounded::<Vec<u8>>(1);
 
         let viewer_video_addr = format!("{viewer_ip}:{viewer_udp_port}");
         info!("Video target UDP {viewer_video_addr}");
@@ -364,7 +370,14 @@ mod imp {
                                 info!("Captured first BGRA frame: {} bytes", f.data.len());
                                 logged_first_capture = true;
                             }
-                            frame_tx.try_send(f.data).ok();
+                            match frame_tx.try_send(f.data) {
+                                Ok(()) => {}
+                                Err(crossbeam_channel::TrySendError::Full(newest)) => {
+                                    let _ = frame_drop_rx.try_recv();
+                                    let _ = frame_tx.try_send(newest);
+                                }
+                                Err(crossbeam_channel::TrySendError::Disconnected(_)) => break,
+                            }
                         }
                         Ok(_) => {}
                         Err(e) => {
