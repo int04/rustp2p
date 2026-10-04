@@ -14,7 +14,6 @@ pub fn run(
     _fps: u32,
     _bitrate_mbps: u32,
     _password: &str,
-    _clipboard: bool,
 ) -> Result<()> {
     anyhow::bail!("This build was compiled without screen-capture support (viewer-only)")
 }
@@ -26,7 +25,6 @@ pub fn run_with_stop(
     _fps: u32,
     _bitrate_mbps: u32,
     _password: String,
-    _clipboard: bool,
     status: Arc<Mutex<String>>,
     _stop: Arc<AtomicBool>,
 ) -> Result<()> {
@@ -46,7 +44,6 @@ mod imp {
 
     use anyhow::{Context, Result};
     use crossbeam_channel::bounded;
-    use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
     use scap::capturer::{Capturer, Options, Resolution};
     use scap::frame::{Frame, FrameType, VideoFrame};
     use tracing::{error, info, warn};
@@ -54,7 +51,6 @@ mod imp {
     use crate::codec::VideoEncoder;
     use crate::crypto::{derive_key, random_bytes, Cipher, SALT_LEN};
     use crate::proto::{ControlMsg, VideoPacket, VIDEO_CHUNK_MAX};
-    use crate::sync::{apply_remote_clipboard, spawn_clipboard_watch, FileReceiver};
     use crate::transport::{send_salt, ControlChannel};
 
     pub fn run(
@@ -63,7 +59,6 @@ mod imp {
         fps: u32,
         bitrate_mbps: u32,
         password: &str,
-        clipboard: bool,
     ) -> Result<()> {
         if !scap::is_supported() {
             anyhow::bail!("Screen capture not supported on this platform");
@@ -91,7 +86,6 @@ mod imp {
                         fps,
                         bitrate_mbps,
                         password,
-                        clipboard,
                     ) {
                         error!("Session error: {e:#}");
                     }
@@ -110,7 +104,6 @@ mod imp {
         fps: u32,
         bitrate_mbps: u32,
         password: String,
-        clipboard: bool,
         status: Arc<Mutex<String>>,
         stop: Arc<AtomicBool>,
     ) -> Result<()> {
@@ -149,7 +142,6 @@ mod imp {
                         fps,
                         bitrate_mbps,
                         &password,
-                        clipboard,
                     ) {
                         error!("Session error: {e:#}");
                     }
@@ -178,7 +170,6 @@ mod imp {
         fps: u32,
         bitrate_mbps: u32,
         password: &str,
-        clipboard_enabled: bool,
     ) -> Result<()> {
         stream.set_nodelay(true)?;
 
@@ -310,152 +301,21 @@ mod imp {
                 capturer.stop_capture();
             })?;
 
-        // Full-duplex control: a writer thread handles host → viewer messages
-        // (clipboard), while this thread reads viewer → host (input, clipboard, files).
-        let (out_tx, out_rx) = bounded::<ControlMsg>(256);
-        let session_stop = Arc::new(AtomicBool::new(false));
-        {
-            let mut writer = ctrl.try_clone()?;
-            std::thread::Builder::new()
-                .name("ctrl-send".into())
-                .spawn(move || {
-                    while let Ok(msg) = out_rx.recv() {
-                        if writer.send(&msg).is_err() {
-                            break;
-                        }
-                    }
-                })?;
-        }
-
-        // Clipboard sync (shared toggle + last value to suppress echo loops).
-        let clip_enabled = Arc::new(AtomicBool::new(clipboard_enabled));
-        let last_clip = Arc::new(Mutex::new(String::new()));
-        spawn_clipboard_watch(
-            clip_enabled.clone(),
-            last_clip.clone(),
-            out_tx.clone(),
-            session_stop.clone(),
-        );
-
-        // Input + clipboard + file reader loop — blocks on ctrl.recv()
-        let mut enigo = Enigo::new(&Settings::default()).context("create Enigo")?;
-        // Map normalized cursor coords against the display's LOGICAL size (points),
-        // which is the coordinate space enigo injects into — not the capture pixel
-        // size. On a Retina Mac the capture is e.g. 2880×1800 px but the cursor
-        // space is 1440×900 pt, so using pixels would land the cursor at ~2× off.
-        let (disp_w, disp_h) = enigo.main_display().unwrap_or((width as i32, height as i32));
-        let sw = disp_w as f64;
-        let sh = disp_h as f64;
-        info!("Input mapping uses display size {disp_w}×{disp_h} (capture {width}×{height})");
-        let mut files = FileReceiver::default();
-
+        // View-only mode: the TCP channel is used only to keep the session alive
+        // and detect disconnects. No keyboard, mouse, clipboard, or file-control
+        // messages are accepted by the host.
         loop {
             match ctrl.recv() {
-                Ok(ControlMsg::Clipboard { text }) => {
-                    if clip_enabled.load(Ordering::Relaxed) {
-                        apply_remote_clipboard(text, last_clip.clone());
-                    }
+                Ok(ControlMsg::Ping) => {
+                    ctrl.send(&ControlMsg::Pong).ok();
                 }
-                Ok(
-                    msg @ (ControlMsg::FileStart { .. }
-                    | ControlMsg::FileChunk { .. }
-                    | ControlMsg::FileEnd { .. }),
-                ) => files.handle(&msg),
-                Ok(msg) => handle_input(&mut enigo, msg, sw, sh),
+                Ok(_) => {}
                 Err(e) => {
                     info!("Control channel closed: {e}");
                     break;
                 }
             }
         }
-        session_stop.store(true, Ordering::Relaxed);
         Ok(())
-    }
-
-    fn handle_input(enigo: &mut Enigo, msg: ControlMsg, sw: f64, sh: f64) {
-        use ControlMsg::*;
-        match msg {
-            MouseMove { nx, ny } => {
-                let x = (nx as f64 * sw) as i32;
-                let y = (ny as f64 * sh) as i32;
-                enigo.move_mouse(x, y, Coordinate::Abs).ok();
-            }
-            MouseButton { btn, pressed } => {
-                let button = match btn {
-                    0 => Button::Left,
-                    1 => Button::Right,
-                    2 => Button::Middle,
-                    _ => return,
-                };
-                let dir = if pressed {
-                    Direction::Press
-                } else {
-                    Direction::Release
-                };
-                enigo.button(button, dir).ok();
-            }
-            MouseScroll { dx, dy } => {
-                if dy.abs() > 0.01 {
-                    enigo.scroll(dy as i32, Axis::Vertical).ok();
-                }
-                if dx.abs() > 0.01 {
-                    enigo.scroll(dx as i32, Axis::Horizontal).ok();
-                }
-            }
-            KeyChar { ch } => {
-                if let Some(c) = char::from_u32(ch) {
-                    enigo.text(&c.to_string()).ok();
-                }
-            }
-            KeyPress { keycode, pressed } => {
-                let dir = if pressed {
-                    Direction::Press
-                } else {
-                    Direction::Release
-                };
-                if let Some(key) = wire_keycode_to_enigo(keycode) {
-                    enigo.key(key, dir).ok();
-                }
-            }
-            Ping => {}
-            _ => {}
-        }
-    }
-
-    fn wire_keycode_to_enigo(code: u32) -> Option<Key> {
-        Some(match code {
-            0x00 => Key::Return,
-            0x01 => Key::Tab,
-            0x02 => Key::Space,
-            0x03 => Key::Backspace,
-            0x04 => Key::Delete,
-            0x05 => Key::Escape,
-            0x10 => Key::UpArrow,
-            0x11 => Key::DownArrow,
-            0x12 => Key::LeftArrow,
-            0x13 => Key::RightArrow,
-            0x14 => Key::Home,
-            0x15 => Key::End,
-            0x16 => Key::PageUp,
-            0x17 => Key::PageDown,
-            0x20 => Key::Shift,
-            0x21 => Key::Control,
-            0x22 => Key::Alt,
-            0x23 => Key::Meta,
-            0x30 => Key::F1,
-            0x31 => Key::F2,
-            0x32 => Key::F3,
-            0x33 => Key::F4,
-            0x34 => Key::F5,
-            0x35 => Key::F6,
-            0x36 => Key::F7,
-            0x37 => Key::F8,
-            0x38 => Key::F9,
-            0x39 => Key::F10,
-            0x3A => Key::F11,
-            0x3B => Key::F12,
-            0x40 => Key::CapsLock,
-            _ => return None,
-        })
     }
 } // mod imp (feature = "capture")

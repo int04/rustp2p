@@ -25,54 +25,6 @@ pub enum ControlMsg {
         fps: u32,
     },
 
-    // Input events: Viewer → Host
-    /// Normalized cursor position [0, 1] relative to remote screen
-    MouseMove {
-        nx: f32,
-        ny: f32,
-    },
-    /// btn: 0=left 1=right 2=middle
-    MouseButton {
-        btn: u8,
-        pressed: bool,
-    },
-    MouseScroll {
-        dx: f32,
-        dy: f32,
-    },
-    /// Raw winit KeyCode discriminant (platform-independent scancode mapping)
-    KeyPress {
-        keycode: u32,
-        pressed: bool,
-    },
-    /// Unicode codepoint for printable characters (text input)
-    KeyChar {
-        ch: u32,
-    },
-
-    /// Clipboard text sync (either direction). Only acted on if the receiver has
-    /// clipboard sync enabled.
-    Clipboard {
-        text: String,
-    },
-
-    // File transfer (currently Viewer → Host). `id` groups a single transfer.
-    /// Begin a file transfer: name (basename only) and total size in bytes.
-    FileStart {
-        id: u32,
-        name: String,
-        size: u64,
-    },
-    /// A sequential chunk of file bytes.
-    FileChunk {
-        id: u32,
-        data: Vec<u8>,
-    },
-    /// End of a file transfer.
-    FileEnd {
-        id: u32,
-    },
-
     Ping,
     Pong,
 }

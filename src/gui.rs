@@ -5,7 +5,7 @@ use anyhow::Result;
 use crossbeam_channel::Receiver;
 use eframe::egui;
 
-use crate::viewer::{egui_key_to_wire, ViewerHandle};
+use crate::viewer::ViewerHandle;
 
 /// Accent color used across the UI (matches the app icon).
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(67, 196, 99);
@@ -119,9 +119,6 @@ struct Session {
     handle: ViewerHandle,
     texture: Option<egui::TextureHandle>,
     screen_rect: egui::Rect,
-    /// Last normalized cursor position sent, to avoid flooding the host with
-    /// identical MouseMove events every frame (which would pin the host cursor).
-    last_mouse: Option<(f32, f32)>,
 }
 
 // ─── App ──────────────────────────────────────────────────────────────────────
@@ -132,7 +129,6 @@ struct App {
     fps: u32,
     bitrate: u32,
     host_password: String,
-    host_clipboard: bool,
     local_ip: String,
     host: HostState,
     // Connect form
@@ -149,10 +145,9 @@ impl Default for App {
     fn default() -> Self {
         Self {
             tab: Tab::Connect,
-            fps: 30,
+            fps: 60,
             bitrate: 8,
             host_password: String::new(),
-            host_clipboard: false,
             local_ip: detect_local_ip(),
             host: HostState::Idle,
             host_ip: String::new(),
@@ -221,7 +216,6 @@ impl App {
                         handle,
                         texture: None,
                         screen_rect: egui::Rect::ZERO,
-                        last_mouse: None,
                     });
                     self.connect_error = None;
                     ctx.request_repaint();
@@ -314,15 +308,17 @@ impl App {
                 ui.end_row();
 
                 ui.label("FPS:");
-                ui.add(egui::Slider::new(&mut self.fps, 5..=60));
+                egui::ComboBox::from_id_salt("host_fps")
+                    .selected_text(format!("{} FPS", self.fps))
+                    .show_ui(ui, |ui| {
+                        for fps in [30_u32, 60, 70, 90, 120, 150, 240] {
+                            ui.selectable_value(&mut self.fps, fps, format!("{fps} FPS"));
+                        }
+                    });
                 ui.end_row();
 
                 ui.label("Bitrate:");
                 ui.add(egui::Slider::new(&mut self.bitrate, 1..=50).suffix(" Mbps"));
-                ui.end_row();
-
-                ui.label("Clipboard:");
-                ui.checkbox(&mut self.host_clipboard, "Share clipboard with viewer");
                 ui.end_row();
             });
 
@@ -365,7 +361,6 @@ impl App {
                 let fps = self.fps;
                 let bitrate = self.bitrate;
                 let password = self.host_password.clone();
-                let clipboard = self.host_clipboard;
 
                 std::thread::Builder::new()
                     .name("host-run".into())
@@ -376,7 +371,6 @@ impl App {
                             fps,
                             bitrate,
                             password,
-                            clipboard,
                             status_clone,
                             stop_clone,
                         ) {
@@ -492,23 +486,9 @@ impl App {
                         if ui.small_button("Disconnect").clicked() {
                             close.push(s.id);
                         }
-                        let mut clip = s.handle.clipboard_enabled.load(Ordering::Relaxed);
-                        if ui
-                            .checkbox(&mut clip, "clipboard")
-                            .on_hover_text("Sync clipboard with this host")
-                            .changed()
-                        {
-                            s.handle.clipboard_enabled.store(clip, Ordering::Relaxed);
-                        }
                     });
                 });
             }
-            ui.add_space(4.0);
-            ui.label(
-                egui::RichText::new("Tip: drag a file onto a session window to send it")
-                    .small()
-                    .color(egui::Color32::from_gray(120)),
-            );
             if !close.is_empty() {
                 self.sessions.retain(|s| {
                     if close.contains(&s.id) {
@@ -590,33 +570,7 @@ fn render_one_session(ctx: &egui::Context, s: &mut Session) -> bool {
                         ui.label(egui::RichText::new("Connecting…").color(egui::Color32::WHITE));
                     });
                 }
-
-                // Show a hint while a file is being dragged over the window.
-                if vctx.input(|i| !i.raw.hovered_files.is_empty()) {
-                    ui.painter().rect_filled(
-                        ui.max_rect(),
-                        0.0,
-                        egui::Color32::from_black_alpha(160),
-                    );
-                    ui.painter().text(
-                        ui.max_rect().center(),
-                        egui::Align2::CENTER_CENTER,
-                        "Drop to send file to host",
-                        egui::FontId::proportional(28.0),
-                        ACCENT,
-                    );
-                }
             });
-
-        forward_input(vctx, s);
-
-        // Files dropped on the window are sent to the host.
-        let dropped = vctx.input(|i| i.raw.dropped_files.clone());
-        for f in dropped {
-            if let Some(path) = f.path {
-                send_file(path, s.handle.input_tx.clone());
-            }
-        }
 
         if vctx.input(|i| i.viewport().close_requested()) {
             keep = false;
@@ -628,159 +582,6 @@ fn render_one_session(ctx: &egui::Context, s: &mut Session) -> bool {
         s.handle.stop.store(true, Ordering::Relaxed);
     }
     keep
-}
-
-/// Forward mouse/keyboard/scroll events from a session window to its remote host.
-fn forward_input(vctx: &egui::Context, s: &mut Session) {
-    if s.texture.is_none() || s.screen_rect == egui::Rect::ZERO {
-        return;
-    }
-    use crate::proto::ControlMsg;
-
-    let events = vctx.input(|i| i.events.clone());
-    let hover = vctx.input(|i| i.pointer.hover_pos());
-    let scroll = vctx.input(|i| i.smooth_scroll_delta);
-
-    if let Some(pos) = hover {
-        if s.screen_rect.contains(pos) {
-            let nx = ((pos.x - s.screen_rect.min.x) / s.screen_rect.width()).clamp(0.0, 1.0);
-            let ny = ((pos.y - s.screen_rect.min.y) / s.screen_rect.height()).clamp(0.0, 1.0);
-            // Only send when the position actually changed — sending the same
-            // position every frame would continuously pin the host's own cursor.
-            let changed = match s.last_mouse {
-                Some((lx, ly)) => (nx - lx).abs() > 0.0005 || (ny - ly).abs() > 0.0005,
-                None => true,
-            };
-            if changed {
-                s.last_mouse = Some((nx, ny));
-                s.handle
-                    .input_tx
-                    .try_send(ControlMsg::MouseMove { nx, ny })
-                    .ok();
-            }
-        }
-    }
-
-    if scroll.length() > 0.1 {
-        s.handle
-            .input_tx
-            .try_send(ControlMsg::MouseScroll {
-                dx: scroll.x / 20.0,
-                dy: scroll.y / 20.0,
-            })
-            .ok();
-    }
-
-    for event in &events {
-        match event {
-            egui::Event::PointerButton {
-                button, pressed, ..
-            } => {
-                let btn = match button {
-                    egui::PointerButton::Primary => 0u8,
-                    egui::PointerButton::Secondary => 1,
-                    egui::PointerButton::Middle => 2,
-                    _ => continue,
-                };
-                s.handle
-                    .input_tx
-                    .try_send(ControlMsg::MouseButton {
-                        btn,
-                        pressed: *pressed,
-                    })
-                    .ok();
-            }
-            egui::Event::Key { key, pressed, .. } => {
-                if let Some(kc) = egui_key_to_wire(*key) {
-                    s.handle
-                        .input_tx
-                        .try_send(ControlMsg::KeyPress {
-                            keycode: kc,
-                            pressed: *pressed,
-                        })
-                        .ok();
-                }
-            }
-            egui::Event::Text(text) => {
-                for ch in text.chars() {
-                    if !ch.is_control() {
-                        s.handle
-                            .input_tx
-                            .try_send(ControlMsg::KeyChar { ch: ch as u32 })
-                            .ok();
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Monotonic id generator for file transfers within this process.
-fn next_file_id() -> u32 {
-    use std::sync::atomic::AtomicU32;
-    static N: AtomicU32 = AtomicU32::new(1);
-    N.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Read a file on a background thread and stream it to the host over the control
-/// channel (blocking sends, so chunks are never dropped).
-fn send_file(path: std::path::PathBuf, tx: crossbeam_channel::Sender<crate::proto::ControlMsg>) {
-    use crate::proto::ControlMsg;
-    use std::io::Read;
-
-    std::thread::Builder::new()
-        .name("file-send".into())
-        .spawn(move || {
-            let name = path
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "file".to_string());
-            let mut file = match std::fs::File::open(&path) {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!("Open {} failed: {e}", path.display());
-                    return;
-                }
-            };
-            let size = file.metadata().map(|m| m.len()).unwrap_or(0);
-            let id = next_file_id();
-
-            if tx
-                .send(ControlMsg::FileStart {
-                    id,
-                    name: name.clone(),
-                    size,
-                })
-                .is_err()
-            {
-                return;
-            }
-            let mut buf = vec![0u8; crate::sync::FILE_CHUNK];
-            loop {
-                match file.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if tx
-                            .send(ControlMsg::FileChunk {
-                                id,
-                                data: buf[..n].to_vec(),
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Read {} failed: {e}", path.display());
-                        break;
-                    }
-                }
-            }
-            tx.send(ControlMsg::FileEnd { id }).ok();
-            tracing::info!("Sent file '{name}' ({size} bytes)");
-        })
-        .ok();
 }
 
 /// Paint a texture into the current UI, aspect-correct and centered, and return

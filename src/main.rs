@@ -4,7 +4,6 @@ mod crypto;
 mod gui;
 mod host;
 mod proto;
-mod sync;
 mod transport;
 mod viewer;
 
@@ -14,7 +13,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "rust-p2p-viewer",
-    about = "Direct LAN peer-to-peer remote desktop — low latency"
+    about = "Direct LAN peer-to-peer screen viewer — low latency"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -23,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Share this machine's screen and accept input
+    /// Share this machine's screen for view-only clients
     Host {
         #[arg(short, long, default_value = "0.0.0.0", help = "Bind address")]
         bind: String,
@@ -35,10 +34,8 @@ enum Cmd {
         bitrate: u32,
         #[arg(short = 'k', long, default_value = "", help = "Connection password")]
         password: String,
-        #[arg(long, help = "Enable bidirectional clipboard sync")]
-        clipboard: bool,
     },
-    /// Connect and view/control a remote host
+    /// Connect and view a remote host (view-only)
     View {
         #[arg(help = "Host IP address or hostname")]
         host: String,
@@ -66,8 +63,7 @@ fn main() -> Result<()> {
             fps,
             bitrate,
             password,
-            clipboard,
-        }) => host::run(&bind, port, fps, bitrate, &password, clipboard),
+        }) => host::run(&bind, port, fps, bitrate, &password),
         Some(Cmd::View {
             host,
             port,

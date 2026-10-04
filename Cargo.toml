@@ -2,7 +2,7 @@
 name = "rust-p2p-viewer"
 version = "0.3.1"
 edition = "2021"
-description = "Direct LAN peer-to-peer remote desktop — low latency"
+description = "Direct LAN peer-to-peer screen viewer — low latency"
 authors = ["teamv-io"]
 
 [[bin]]
@@ -13,8 +13,8 @@ path = "src/main.rs"
 [package.metadata.packager]
 product-name = "Rust P2P Viewer"
 identifier = "io.teamv.rustp2pviewer"
-description = "Direct LAN peer-to-peer remote desktop — low latency"
-long-description = "A LAN-only peer-to-peer remote desktop tool. Direct connection between machines on the same network for minimal latency. Host shares its screen; viewer controls it with mouse and keyboard."
+description = "Direct LAN peer-to-peer screen viewer — low latency"
+long-description = "A LAN-only peer-to-peer screen viewing tool. Direct connection between machines on the same network for minimal latency. Host shares its screen; viewers are strictly view-only."
 authors = ["teamv-io"]
 icons = ["icons/icon.icns", "icons/icon.ico", "icons/icon.png"]
 category = "Utility"
@@ -37,12 +37,6 @@ scap = { version = "0.1.0-beta.1", optional = true }
 
 # H.264 encode/decode — downloads Cisco's prebuilt openh264 at build time
 openh264 = { version = "0.9", features = ["source"] }
-
-# Cross-platform input injection
-enigo = "0.6"
-
-# Cross-platform clipboard access (text sync)
-arboard = "3"
 
 # GUI framework (replaces winit + softbuffer)
 eframe = "0.34"

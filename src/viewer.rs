@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::{TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -12,7 +12,6 @@ use tracing::{error, info, warn};
 use crate::codec::VideoDecoder;
 use crate::crypto::{derive_key, Cipher};
 use crate::proto::{ControlMsg, InboundVideo};
-use crate::sync::{apply_remote_clipboard, spawn_clipboard_watch, FileReceiver};
 use crate::transport::{recv_salt, ControlChannel};
 
 /// A decoded RGBA frame ready for display
@@ -25,12 +24,9 @@ pub struct RgbaFrame {
 /// Handle returned by spawn_threads — holds channels and stop flag for GUI integration
 pub struct ViewerHandle {
     pub frame_rx: Receiver<RgbaFrame>,
-    pub input_tx: Sender<ControlMsg>,
     pub remote_w: u32,
     pub remote_h: u32,
     pub stop: Arc<AtomicBool>,
-    /// Toggled by the GUI to enable/disable bidirectional clipboard sync.
-    pub clipboard_enabled: Arc<AtomicBool>,
 }
 
 /// Connects + handshakes synchronously, then spawns decode pipeline threads.
@@ -72,8 +68,6 @@ pub fn spawn_threads(
     let (nal_tx, nal_rx) = bounded::<Vec<u8>>(4);
     // Channel: decoded RGBA frames → GUI
     let (frame_tx, frame_rx) = bounded::<RgbaFrame>(2);
-    // Channel: input events from GUI → TCP sender
-    let (input_tx, input_rx) = bounded::<ControlMsg>(64);
 
     // UDP receiver thread — decrypts datagrams, assembles chunks into complete NALs
     {
@@ -125,13 +119,10 @@ pub fn spawn_threads(
             })?;
     }
 
-    // Clone a reader handle before the writer thread takes ownership of `ctrl`
-    // (send and recv are independent directions on the duplex TCP connection).
+    // View-only control channel. Keep a reader alive so disconnects are detected,
+    // but do not expose any channel for keyboard/mouse/clipboard/file messages.
     let mut ctrl_reader = ctrl.try_clone()?;
 
-    // Shutdown watcher: when `stop` is set (Disconnect / window closed), close the
-    // socket so both the reader (parked in recv) and writer unblock — and the host
-    // sees EOF and frees the session instead of staying stuck on a dead connection.
     {
         let stop = stop.clone();
         let shutdown_stream = ctrl.try_clone_stream()?;
@@ -145,77 +136,29 @@ pub fn spawn_threads(
             })?;
     }
 
-    // Clipboard sync state shared between the watch thread and the reader thread.
-    let clipboard_enabled = Arc::new(AtomicBool::new(false));
-    let last_clip = Arc::new(Mutex::new(String::new()));
-
-    // Input/output sender thread — reads from input_rx, sends over TCP ctrl channel
     {
         let stop = stop.clone();
         std::thread::Builder::new()
-            .name("ctrl-send".into())
+            .name("ctrl-recv".into())
             .spawn(move || loop {
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
-                match input_rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(msg) => {
-                        if ctrl.send(&msg).is_err() {
-                            break;
-                        }
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                }
-            })?;
-    }
-
-    // Control reader thread — handles host → viewer messages (clipboard, files).
-    {
-        let stop = stop.clone();
-        let enabled = clipboard_enabled.clone();
-        let last = last_clip.clone();
-        std::thread::Builder::new()
-            .name("ctrl-recv".into())
-            .spawn(move || {
-                let mut files = FileReceiver::default();
-                loop {
-                    if stop.load(Ordering::Relaxed) {
+                match ctrl_reader.recv() {
+                    Ok(_) => {}
+                    Err(_) => {
+                        stop.store(true, Ordering::Relaxed);
                         break;
                     }
-                    match ctrl_reader.recv() {
-                        Ok(ControlMsg::Clipboard { text }) => {
-                            if enabled.load(Ordering::Relaxed) {
-                                apply_remote_clipboard(text, last.clone());
-                            }
-                        }
-                        Ok(
-                            msg @ (ControlMsg::FileStart { .. }
-                            | ControlMsg::FileChunk { .. }
-                            | ControlMsg::FileEnd { .. }),
-                        ) => files.handle(&msg),
-                        Ok(_) => {}
-                        Err(_) => break,
-                    }
                 }
             })?;
     }
-
-    // Clipboard watch thread — forwards local copies to the host while enabled.
-    spawn_clipboard_watch(
-        clipboard_enabled.clone(),
-        last_clip,
-        input_tx.clone(),
-        stop.clone(),
-    );
 
     Ok(ViewerHandle {
         frame_rx,
-        input_tx,
         remote_w,
         remote_h,
         stop,
-        clipboard_enabled,
     })
 }
 
@@ -313,7 +256,7 @@ pub fn run(host: &str, port: u16, password: &str) -> Result<()> {
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// eframe App that renders the remote screen and forwards input events
+/// eframe App that renders the remote screen in strict view-only mode
 pub struct ViewerWindow {
     handle: ViewerHandle,
     texture: Option<egui::TextureHandle>,
@@ -364,83 +307,6 @@ impl eframe::App for ViewerWindow {
                 }
             });
 
-        // Forward input if we have an active screen rect
-        if self.texture.is_some() && self.screen_rect != egui::Rect::ZERO {
-            let events = ctx.input(|i| i.events.clone());
-            let hover = ctx.input(|i| i.pointer.hover_pos());
-            let scroll = ctx.input(|i| i.smooth_scroll_delta);
-
-            // Mouse move
-            if let Some(pos) = hover {
-                if self.screen_rect.contains(pos) {
-                    let nx = ((pos.x - self.screen_rect.min.x) / self.screen_rect.width())
-                        .clamp(0.0, 1.0);
-                    let ny = ((pos.y - self.screen_rect.min.y) / self.screen_rect.height())
-                        .clamp(0.0, 1.0);
-                    self.handle
-                        .input_tx
-                        .try_send(ControlMsg::MouseMove { nx, ny })
-                        .ok();
-                }
-            }
-
-            // Mouse scroll
-            if scroll.length() > 0.1 {
-                self.handle
-                    .input_tx
-                    .try_send(ControlMsg::MouseScroll {
-                        dx: scroll.x / 20.0,
-                        dy: scroll.y / 20.0,
-                    })
-                    .ok();
-            }
-
-            // Keyboard and pointer button events
-            for event in &events {
-                match event {
-                    egui::Event::PointerButton {
-                        button, pressed, ..
-                    } => {
-                        let btn = match button {
-                            egui::PointerButton::Primary => 0u8,
-                            egui::PointerButton::Secondary => 1,
-                            egui::PointerButton::Middle => 2,
-                            _ => continue,
-                        };
-                        self.handle
-                            .input_tx
-                            .try_send(ControlMsg::MouseButton {
-                                btn,
-                                pressed: *pressed,
-                            })
-                            .ok();
-                    }
-                    egui::Event::Key { key, pressed, .. } => {
-                        if let Some(kc) = egui_key_to_wire(*key) {
-                            self.handle
-                                .input_tx
-                                .try_send(ControlMsg::KeyPress {
-                                    keycode: kc,
-                                    pressed: *pressed,
-                                })
-                                .ok();
-                        }
-                    }
-                    egui::Event::Text(text) => {
-                        for ch in text.chars() {
-                            if !ch.is_control() {
-                                self.handle
-                                    .input_tx
-                                    .try_send(ControlMsg::KeyChar { ch: ch as u32 })
-                                    .ok();
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
         // Keep redrawing so newly decoded frames appear without an input event.
         ctx.request_repaint();
     }
@@ -448,37 +314,4 @@ impl eframe::App for ViewerWindow {
     fn on_exit(&mut self) {
         self.handle.stop.store(true, Ordering::Relaxed);
     }
-}
-
-/// Map egui::Key to our wire key codes (same table used by host.rs).
-/// Note: Space is handled via Event::Text(" "), not as a Key variant.
-pub fn egui_key_to_wire(key: egui::Key) -> Option<u32> {
-    Some(match key {
-        egui::Key::Enter => 0x00,
-        egui::Key::Tab => 0x01,
-        egui::Key::Backspace => 0x03,
-        egui::Key::Delete => 0x04,
-        egui::Key::Escape => 0x05,
-        egui::Key::ArrowUp => 0x10,
-        egui::Key::ArrowDown => 0x11,
-        egui::Key::ArrowLeft => 0x12,
-        egui::Key::ArrowRight => 0x13,
-        egui::Key::Home => 0x14,
-        egui::Key::End => 0x15,
-        egui::Key::PageUp => 0x16,
-        egui::Key::PageDown => 0x17,
-        egui::Key::F1 => 0x30,
-        egui::Key::F2 => 0x31,
-        egui::Key::F3 => 0x32,
-        egui::Key::F4 => 0x33,
-        egui::Key::F5 => 0x34,
-        egui::Key::F6 => 0x35,
-        egui::Key::F7 => 0x36,
-        egui::Key::F8 => 0x37,
-        egui::Key::F9 => 0x38,
-        egui::Key::F10 => 0x39,
-        egui::Key::F11 => 0x3A,
-        egui::Key::F12 => 0x3B,
-        _ => return None,
-    })
 }
