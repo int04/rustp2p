@@ -84,18 +84,24 @@ mod imp {
             match incoming {
                 Ok(stream) => {
                     let peer = stream.peer_addr()?;
+                    let viewer_ip = peer.ip().to_string();
+                    let password = password.to_owned();
                     info!("Viewer connected from {peer}");
-                    if let Err(e) = handle_session(
-                        stream,
-                        peer.ip().to_string(),
-                        fps,
-                        bitrate_mbps,
-                        backend,
-                        password,
-                    ) {
-                        error!("Session error: {e:#}");
-                    }
-                    info!("Viewer disconnected, waiting for next connection");
+                    std::thread::Builder::new()
+                        .name(format!("session-{peer}"))
+                        .spawn(move || {
+                            if let Err(e) = handle_session(
+                                stream,
+                                viewer_ip,
+                                fps,
+                                bitrate_mbps,
+                                backend,
+                                &password,
+                            ) {
+                                error!("Session {peer} error: {e:#}");
+                            }
+                            info!("Viewer {peer} disconnected");
+                        })?;
                 }
                 Err(e) => error!("Accept error: {e}"),
             }
@@ -141,24 +147,27 @@ mod imp {
                     info!("Viewer connected from {peer}");
                     *status.lock().unwrap() = format!("Viewer connected: {peer}");
 
-                    // Switch back to blocking for session I/O
+                    // Each viewer gets its own session thread. The accept loop must stay
+                    // responsive so a stale/slow connection cannot block new viewers.
                     stream.set_nonblocking(false).ok();
-                    if let Err(e) = handle_session(
-                        stream,
-                        peer.ip().to_string(),
-                        fps,
-                        bitrate_mbps,
-                        backend,
-                        &password,
-                    ) {
-                        error!("Session error: {e:#}");
-                    }
+                    let viewer_ip = peer.ip().to_string();
+                    let session_password = password.clone();
+                    std::thread::Builder::new()
+                        .name(format!("session-{peer}"))
+                        .spawn(move || {
+                            if let Err(e) = handle_session(
+                                stream,
+                                viewer_ip,
+                                fps,
+                                bitrate_mbps,
+                                backend,
+                                &session_password,
+                            ) {
+                                error!("Session {peer} error: {e:#}");
+                            }
+                            info!("Viewer {peer} disconnected");
+                        })?;
 
-                    if stop.load(Ordering::Relaxed) {
-                        *status.lock().unwrap() = "Stopped".to_string();
-                        return Ok(());
-                    }
-                    info!("Viewer disconnected, waiting for next connection");
                     *status.lock().unwrap() = "Waiting for viewer…".to_string();
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -181,6 +190,9 @@ mod imp {
         password: &str,
     ) -> Result<()> {
         stream.set_nodelay(true)?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .context("set handshake timeout")?;
 
         // Encryption handshake: send a fresh salt, derive the shared key from the
         // password. A wrong password produces a different key, so the encrypted Hello
@@ -209,8 +221,12 @@ mod imp {
             probe.get_output_frame_size()
         };
         ctrl.send(&ControlMsg::Welcome { width, height, fps })?;
+        ctrl.try_clone_stream()?
+            .set_read_timeout(None)
+            .context("clear handshake timeout")?;
         info!("Screen size {width}×{height}, streaming at {fps} fps / {bitrate_mbps} Mbps / {}", backend.label());
 
+        let session_stop = Arc::new(AtomicBool::new(false));
         let (frame_tx, frame_rx) = bounded::<Vec<u8>>(2);
         let (nal_tx, nal_rx) = bounded::<Vec<u8>>(4);
 
@@ -276,6 +292,7 @@ mod imp {
             })?;
 
         // Capture thread — Capturer must be created on the thread that uses it
+        let capture_stop = session_stop.clone();
         std::thread::Builder::new()
             .name("capture".into())
             .spawn(move || {
@@ -295,7 +312,7 @@ mod imp {
                 };
                 capturer.start_capture();
 
-                loop {
+                while !capture_stop.load(Ordering::Relaxed) {
                     match capturer.get_next_frame() {
                         Ok(Frame::Video(VideoFrame::BGRA(f))) if !f.data.is_empty() => {
                             frame_tx.try_send(f.data).ok();
@@ -325,6 +342,7 @@ mod imp {
                 }
             }
         }
+        session_stop.store(true, Ordering::Relaxed);
         Ok(())
     }
 } // mod imp (feature = "capture")

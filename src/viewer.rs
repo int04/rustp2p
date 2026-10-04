@@ -41,6 +41,9 @@ pub fn spawn_threads(
     let addr = format!("{host}:{port}");
     let mut stream = TcpStream::connect(&addr).context("connect to host")?;
     stream.set_nodelay(true)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .context("set handshake timeout")?;
     info!("Connected to {addr}");
 
     // Bind our UDP video socket first so we can tell the host which port to stream
@@ -62,6 +65,9 @@ pub fn spawn_threads(
         Err(_) => anyhow::bail!("Incorrect password, or the host rejected the connection"),
     };
     info!("Remote screen {remote_w}×{remote_h} @ {fps} fps");
+    ctrl.try_clone_stream()?
+        .set_read_timeout(None)
+        .context("clear handshake timeout")?;
 
     let stop = Arc::new(AtomicBool::new(false));
 
