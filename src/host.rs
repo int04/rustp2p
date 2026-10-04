@@ -181,6 +181,26 @@ mod imp {
         }
     }
 
+    fn h264_sps_profile_level(data: &[u8]) -> Option<(u8, u8, u8)> {
+        let mut i = 0usize;
+        while i + 8 <= data.len() {
+            let prefix = if data[i..].starts_with(&[0, 0, 0, 1]) {
+                4
+            } else if data[i..].starts_with(&[0, 0, 1]) {
+                3
+            } else {
+                i += 1;
+                continue;
+            };
+            let nal = i + prefix;
+            if nal + 3 < data.len() && (data[nal] & 0x1f) == 7 {
+                return Some((data[nal + 1], data[nal + 2], data[nal + 3]));
+            }
+            i = nal + 1;
+        }
+        None
+    }
+
     fn handle_session(
         mut stream: std::net::TcpStream,
         viewer_ip: String,
@@ -288,6 +308,9 @@ mod imp {
                     let total = chunks.len() as u16;
                     if !logged_first_frame {
                         info!("Sending first video frame: {} bytes in {} UDP chunks to {}", nal.len(), total, viewer_video_addr);
+                        if let Some((profile, constraints, level)) = h264_sps_profile_level(&nal) {
+                            info!("H.264 SPS: profile_idc={profile}, constraints=0x{constraints:02x}, level_idc={level}");
+                        }
                         logged_first_frame = true;
                     }
                     let pts_ms = t0.elapsed().as_millis() as u32;

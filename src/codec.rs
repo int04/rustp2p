@@ -360,10 +360,13 @@ impl HardwareVideoDecoder {
         let timestamp = VideoTimestamp::new(self.timestamp, 90_000)
             .ok_or_else(|| anyhow::anyhow!("invalid hardware decoder timestamp"))?;
         self.timestamp = self.timestamp.wrapping_add(self.timestamp_step);
-        let is_keyframe = h264_contains_idr(nal);
+        let mut bitstream = nal.to_vec();
+        #[cfg(target_os = "windows")]
+        clamp_h264_level_for_media_foundation(&mut bitstream);
+        let is_keyframe = h264_contains_idr(&bitstream);
         let access = EncodedAccessUnit::new(
             VideoCodec::H264,
-            nal.to_vec(),
+            bitstream,
             timestamp,
             is_keyframe,
         );
@@ -385,6 +388,32 @@ impl HardwareVideoDecoder {
         }
 
         hardware_frame_to_rgba(&self.dec, frame.surface)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn clamp_h264_level_for_media_foundation(data: &mut [u8]) {
+    let mut i = 0usize;
+    while i + 8 <= data.len() {
+        let prefix = if data[i..].starts_with(&[0, 0, 0, 1]) {
+            4
+        } else if data[i..].starts_with(&[0, 0, 1]) {
+            3
+        } else {
+            i += 1;
+            continue;
+        };
+        let nal = i + prefix;
+        if nal + 3 < data.len() && (data[nal] & 0x1f) == 7 {
+            // On this Windows Media Foundation path, High Profile Level 5.1
+            // accepts input but never emits decoded surfaces. The RTX hardware
+            // can handle the stream, so clamp only the SPS level signalling.
+            if data[nal + 3] > 50 {
+                data[nal + 3] = 50;
+            }
+            return;
+        }
+        i = nal + 1;
     }
 }
 
