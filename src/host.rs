@@ -239,13 +239,21 @@ mod imp {
             .name("encoder".into())
             .spawn(move || {
                 let mut enc = match VideoEncoder::new(backend, fps, bitrate_mbps, w, h) {
-                    Ok(e) => e,
+                    Ok(e) => {
+                        info!("{} encoder ready", backend.label());
+                        e
+                    },
                     Err(e) => {
                         error!("Encoder init: {e:#}");
                         return;
                     }
                 };
+                let mut logged_first_input = false;
                 while let Ok(bgra) = frame_rx.recv() {
+                    if !logged_first_input {
+                        info!("{} encoder received first BGRA frame: {} bytes", backend.label(), bgra.len());
+                        logged_first_input = true;
+                    }
                     match enc.encode_bgra(&bgra, w, h) {
                         Ok(nal) if !nal.is_empty() => {
                             nal_tx.send(nal).ok();
@@ -317,10 +325,16 @@ mod imp {
                     }
                 };
                 capturer.start_capture();
+                info!("Capture started at {fps} FPS");
+                let mut logged_first_capture = false;
 
                 while !capture_stop.load(Ordering::Relaxed) {
                     match capturer.get_next_frame() {
                         Ok(Frame::Video(VideoFrame::BGRA(f))) if !f.data.is_empty() => {
+                            if !logged_first_capture {
+                                info!("Captured first BGRA frame: {} bytes", f.data.len());
+                                logged_first_capture = true;
+                            }
                             frame_tx.try_send(f.data).ok();
                         }
                         Ok(_) => {}

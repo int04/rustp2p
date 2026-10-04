@@ -134,6 +134,9 @@ impl VideoToolboxEncoder {
 
         let session = CompressionSession::builder(width_i32, height_i32, Codec::H264)
             .with_real_time(true)
+            // Interactive screen streaming should not use B-frame reordering:
+            // it adds latency and makes hardware decoders buffer several frames.
+            .with_allow_frame_reordering(false)
             .with_hardware_acceleration(HardwareAcceleration::Required)
             .with_average_bit_rate(i32::try_from(bitrate_mbps.saturating_mul(1_000_000))
                 .unwrap_or(i32::MAX))
@@ -320,7 +323,10 @@ struct HardwareVideoDecoder {
 impl HardwareVideoDecoder {
     fn new(fps: u32) -> Result<Self> {
         let options = openipc_video::DecoderOptions {
-            max_frames_in_flight: 3,
+            // Media Foundation may need several compressed frames before the
+            // first NV12 surface becomes available, especially at high FPS.
+            // Three frames caused an immediate flush/backpressure loop at 90 FPS.
+            max_frames_in_flight: 16,
             low_latency: true,
             require_hardware: true,
         };
