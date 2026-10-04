@@ -9,7 +9,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use eframe::egui;
 use tracing::{error, info, warn};
 
-use crate::codec::VideoDecoder;
+use crate::codec::{VideoBackend, VideoDecoder};
 use crate::crypto::{derive_key, Cipher};
 use crate::proto::{ControlMsg, InboundVideo};
 use crate::transport::{recv_salt, ControlChannel};
@@ -35,6 +35,7 @@ pub fn spawn_threads(
     host: &str,
     port: u16,
     password: &str,
+    backend: VideoBackend,
     ctx: egui::Context,
 ) -> Result<ViewerHandle> {
     let addr = format!("{host}:{port}");
@@ -86,7 +87,7 @@ pub fn spawn_threads(
         std::thread::Builder::new()
             .name("decoder".into())
             .spawn(move || {
-                let mut dec = match VideoDecoder::new() {
+                let mut dec = match VideoDecoder::new(backend, fps) {
                     Ok(d) => d,
                     Err(e) => {
                         error!("Decoder init: {e:#}");
@@ -233,7 +234,7 @@ fn udp_receiver(sock: UdpSocket, cipher: Cipher, nal_tx: Sender<Vec<u8>>, stop: 
 // ─── CLI run path ──────────────────────────────────────────────────────────────
 
 /// Used by the CLI `view` subcommand — opens its own eframe window
-pub fn run(host: &str, port: u16, password: &str) -> Result<()> {
+pub fn run(host: &str, port: u16, password: &str, backend: VideoBackend) -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Rust P2P Viewer")
@@ -248,7 +249,7 @@ pub fn run(host: &str, port: u16, password: &str) -> Result<()> {
         "Rust P2P Viewer",
         options,
         Box::new(move |cc| {
-            let handle = spawn_threads(&host, port, &password, cc.egui_ctx.clone())
+            let handle = spawn_threads(&host, port, &password, backend, cc.egui_ctx.clone())
                 .expect("Failed to connect to host");
             Ok(Box::new(ViewerWindow::new(handle)) as Box<dyn eframe::App>)
         }),

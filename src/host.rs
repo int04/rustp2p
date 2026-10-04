@@ -3,6 +3,8 @@
 #[cfg(not(feature = "capture"))]
 use anyhow::Result;
 #[cfg(not(feature = "capture"))]
+use crate::codec::VideoBackend;
+#[cfg(not(feature = "capture"))]
 use std::sync::atomic::AtomicBool;
 #[cfg(not(feature = "capture"))]
 use std::sync::{Arc, Mutex};
@@ -13,6 +15,7 @@ pub fn run(
     _port: u16,
     _fps: u32,
     _bitrate_mbps: u32,
+    _backend: VideoBackend,
     _password: &str,
 ) -> Result<()> {
     anyhow::bail!("This build was compiled without screen-capture support (viewer-only)")
@@ -24,6 +27,7 @@ pub fn run_with_stop(
     _port: u16,
     _fps: u32,
     _bitrate_mbps: u32,
+    _backend: VideoBackend,
     _password: String,
     status: Arc<Mutex<String>>,
     _stop: Arc<AtomicBool>,
@@ -48,7 +52,7 @@ mod imp {
     use scap::frame::{Frame, FrameType, VideoFrame};
     use tracing::{error, info, warn};
 
-    use crate::codec::VideoEncoder;
+    use crate::codec::{VideoBackend, VideoEncoder};
     use crate::crypto::{derive_key, random_bytes, Cipher, SALT_LEN};
     use crate::proto::{ControlMsg, VideoPacket, VIDEO_CHUNK_MAX};
     use crate::transport::{send_salt, ControlChannel};
@@ -58,6 +62,7 @@ mod imp {
         port: u16,
         fps: u32,
         bitrate_mbps: u32,
+        backend: VideoBackend,
         password: &str,
     ) -> Result<()> {
         if !scap::is_supported() {
@@ -85,6 +90,7 @@ mod imp {
                         peer.ip().to_string(),
                         fps,
                         bitrate_mbps,
+                        backend,
                         password,
                     ) {
                         error!("Session error: {e:#}");
@@ -103,6 +109,7 @@ mod imp {
         port: u16,
         fps: u32,
         bitrate_mbps: u32,
+        backend: VideoBackend,
         password: String,
         status: Arc<Mutex<String>>,
         stop: Arc<AtomicBool>,
@@ -141,6 +148,7 @@ mod imp {
                         peer.ip().to_string(),
                         fps,
                         bitrate_mbps,
+                        backend,
                         &password,
                     ) {
                         error!("Session error: {e:#}");
@@ -169,6 +177,7 @@ mod imp {
         viewer_ip: String,
         fps: u32,
         bitrate_mbps: u32,
+        backend: VideoBackend,
         password: &str,
     ) -> Result<()> {
         stream.set_nodelay(true)?;
@@ -200,7 +209,7 @@ mod imp {
             probe.get_output_frame_size()
         };
         ctrl.send(&ControlMsg::Welcome { width, height, fps })?;
-        info!("Screen size {width}×{height}, streaming at {fps} fps / {bitrate_mbps} Mbps");
+        info!("Screen size {width}×{height}, streaming at {fps} fps / {bitrate_mbps} Mbps / {}", backend.label());
 
         let (frame_tx, frame_rx) = bounded::<Vec<u8>>(2);
         let (nal_tx, nal_rx) = bounded::<Vec<u8>>(4);
@@ -212,7 +221,7 @@ mod imp {
         std::thread::Builder::new()
             .name("encoder".into())
             .spawn(move || {
-                let mut enc = match VideoEncoder::new(fps, bitrate_mbps) {
+                let mut enc = match VideoEncoder::new(backend, fps, bitrate_mbps, w, h) {
                     Ok(e) => e,
                     Err(e) => {
                         error!("Encoder init: {e:#}");

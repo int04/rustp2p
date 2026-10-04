@@ -5,6 +5,7 @@ use anyhow::Result;
 use crossbeam_channel::Receiver;
 use eframe::egui;
 
+use crate::codec::VideoBackend;
 use crate::viewer::ViewerHandle;
 
 /// Accent color used across the UI (matches the app icon).
@@ -128,12 +129,14 @@ struct App {
     // Host settings
     fps: u32,
     bitrate: u32,
+    host_backend: VideoBackend,
     host_password: String,
     local_ip: String,
     host: HostState,
     // Connect form
     host_ip: String,
     view_password: String,
+    view_backend: VideoBackend,
     connect_error: Option<String>,
     // Multi-session state
     pending: Vec<Pending>,
@@ -147,11 +150,13 @@ impl Default for App {
             tab: Tab::Connect,
             fps: 60,
             bitrate: 8,
+            host_backend: VideoBackend::Cpu,
             host_password: String::new(),
             local_ip: detect_local_ip(),
             host: HostState::Idle,
             host_ip: String::new(),
             view_password: String::new(),
+            view_backend: VideoBackend::Cpu,
             connect_error: None,
             pending: Vec::new(),
             sessions: Vec::new(),
@@ -320,6 +325,15 @@ impl App {
                 ui.label("Bitrate:");
                 ui.add(egui::Slider::new(&mut self.bitrate, 1..=50).suffix(" Mbps"));
                 ui.end_row();
+
+                ui.label("Encoder:");
+                egui::ComboBox::from_id_salt("host_encoder")
+                    .selected_text(self.host_backend.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.host_backend, VideoBackend::Cpu, "CPU · OpenH264");
+                        ui.selectable_value(&mut self.host_backend, VideoBackend::Gpu, "GPU · Hardware");
+                    });
+                ui.end_row();
             });
 
         ui.add_space(16.0);
@@ -360,6 +374,7 @@ impl App {
                 let stop_clone = stop.clone();
                 let fps = self.fps;
                 let bitrate = self.bitrate;
+                let backend = self.host_backend;
                 let password = self.host_password.clone();
 
                 std::thread::Builder::new()
@@ -370,6 +385,7 @@ impl App {
                             7272,
                             fps,
                             bitrate,
+                            backend,
                             password,
                             status_clone,
                             stop_clone,
@@ -426,6 +442,15 @@ impl App {
                         .hint_text("host's password")
                         .desired_width(160.0),
                 );
+                ui.end_row();
+
+                ui.label("Decoder:");
+                egui::ComboBox::from_id_salt("view_decoder")
+                    .selected_text(self.view_backend.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.view_backend, VideoBackend::Cpu, "CPU · OpenH264");
+                        ui.selectable_value(&mut self.view_backend, VideoBackend::Gpu, "GPU · Hardware");
+                    });
                 ui.end_row();
             });
 
@@ -506,12 +531,13 @@ impl App {
         self.connect_error = None;
         let ip = self.host_ip.trim().to_string();
         let pw = self.view_password.clone();
+        let backend = self.view_backend;
         let (tx, rx) = crossbeam_channel::bounded(1);
 
         std::thread::Builder::new()
             .name("viewer-connect".into())
             .spawn(move || {
-                let result = crate::viewer::spawn_threads(&ip, 7272, &pw, ctx);
+                let result = crate::viewer::spawn_threads(&ip, 7272, &pw, backend, ctx);
                 tx.send(result).ok();
             })
             .ok();

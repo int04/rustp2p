@@ -35,8 +35,11 @@ scap = { path = "vendor/scap" }
 # viewer-only build can compile without the capture backend (see [features]).
 scap = { version = "0.1.0-beta.1", optional = true }
 
-# H.264 encode/decode — downloads Cisco's prebuilt openh264 at build time
+# CPU H.264 encode/decode — downloads Cisco's prebuilt OpenH264 at build time
 openh264 = { version = "0.9", features = ["source"] }
+
+# Cross-platform hardware H.264/H.265 decoder: VideoToolbox (macOS), Media Foundation + D3D11 (Windows).
+openipc-video = "0.1.40"
 
 # GUI framework (replaces winit + softbuffer)
 eframe = "0.34"
@@ -56,3 +59,8 @@ bincode = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Native Apple hardware H.264 via VideoToolbox. Kept target-scoped so Windows/Linux builds stay clean.
+videotoolbox = { version = "0.21", features = ["compression"] }
+apple-cf = "0.11"
