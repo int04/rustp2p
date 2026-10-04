@@ -183,10 +183,6 @@ pub(crate) fn create_capturer(
         flags: cm::TimeFlags::VALID,
     });
     stream_config.set_captures_audio(options.captures_audio);
-    // ScreenCaptureKit defaults to a deeper queue for throughput. For interactive
-    // LAN mirroring we prefer freshness over buffering; two surfaces are enough
-    // to keep capture flowing while avoiding several frames of hidden latency.
-    stream_config.set_queue_depth(2);
 
     let error_handler = ErrorHandler::with(ErrorHandlerInner { error_flag });
     let stream = sc::Stream::with_delegate(&filter, &stream_config, error_handler.as_ref());
