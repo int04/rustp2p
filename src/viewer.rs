@@ -85,11 +85,23 @@ pub fn spawn_threads(
             .spawn(move || udp_receiver(udp_sock, cipher, nal_tx, stop))?;
     }
 
-    // Initialize the decoder synchronously so GPU capability errors are
-    // reported to the GUI instead of leaving a viewer window stuck on "Connecting…".
-    let mut decoder = VideoDecoder::new(backend, fps).context("initialize video decoder")?;
+    #[cfg(target_os = "windows")]
+    if backend == VideoBackend::Gpu {
+        use openipc_video::{VideoCodec, VideoDecoder as _};
+        let caps = openipc_video::PlatformDecoder::probe_capabilities();
+        let h264 = caps
+            .codec(VideoCodec::H264)
+            .ok_or_else(|| anyhow::anyhow!("GPU decoder reports no H.264 capability"))?;
+        if !h264.supported {
+            anyhow::bail!("GPU H.264 decode is not supported by the selected Windows adapter");
+        }
+        if !h264.hardware_accelerated {
+            anyhow::bail!("Windows H.264 decoder is not hardware accelerated on the selected adapter");
+        }
+    }
 
-    // Decoder thread
+    // Decoder thread. Media Foundation decoder objects are thread-affine/non-Send,
+    // so construct and drive the decoder on this worker thread.
     {
         let stop = stop.clone();
         let frame_tx2 = frame_tx;
@@ -97,6 +109,13 @@ pub fn spawn_threads(
         std::thread::Builder::new()
             .name("decoder".into())
             .spawn(move || {
+                let mut decoder = match VideoDecoder::new(backend, fps) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        warn!("Decoder init: {e:#}");
+                        return;
+                    }
+                };
                 loop {
                     if stop.load(Ordering::Relaxed) {
                         break;
