@@ -115,6 +115,7 @@ pub fn spawn_threads(
         std::thread::Builder::new()
             .name("decoder".into())
             .spawn(move || {
+                let mut logged_first_nal = false;
                 let mut decoder = match VideoDecoder::new(backend, fps) {
                     Ok(d) => {
                         *status2.lock().unwrap() = format!("{} decoder ready · waiting for video…", backend.label());
@@ -133,6 +134,10 @@ pub fn spawn_threads(
                     }
                     match nal_rx.recv_timeout(Duration::from_millis(100)) {
                         Ok(nal) => {
+                            if !logged_first_nal {
+                                info!("{} decoder received first complete H.264 access unit: {} bytes", backend.label(), nal.len());
+                                logged_first_nal = true;
+                            }
                             *status2.lock().unwrap() =
                                 format!("{} decoder · received {} bytes…", backend.label(), nal.len());
                             ctx2.request_repaint();
@@ -231,6 +236,7 @@ fn udp_receiver(
     let mut last_seen_id: u32 = 0;
     let mut packet_count: u64 = 0;
     let mut complete_count: u64 = 0;
+    let mut raw_count: u64 = 0;
 
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -238,7 +244,13 @@ fn udp_receiver(
         }
 
         let n = match sock.recv(&mut buf) {
-            Ok(n) => n,
+            Ok(n) => {
+                raw_count = raw_count.saturating_add(1);
+                if raw_count == 1 {
+                    info!("Received first raw UDP datagram: {n} bytes");
+                }
+                n
+            },
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -260,6 +272,9 @@ fn udp_receiver(
         };
 
         packet_count = packet_count.saturating_add(1);
+        if packet_count == 1 {
+            info!("Authenticated first video packet: frame={} chunk={}/{}", pkt.frame_id, pkt.chunk_idx + 1, pkt.total_chunks);
+        }
         if packet_count == 1 || packet_count % 500 == 0 {
             *status.lock().unwrap() = format!(
                 "UDP packets {packet_count} · complete frames {complete_count} · pending {}",
@@ -291,6 +306,9 @@ fn udp_receiver(
             }
             last_seen_id = pkt.frame_id;
             complete_count = complete_count.saturating_add(1);
+            if complete_count == 1 {
+                info!("Reassembled first complete video frame: {} bytes", assembled.len());
+            }
             *status.lock().unwrap() = format!(
                 "UDP packets {packet_count} · complete frames {complete_count}"
             );

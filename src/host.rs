@@ -231,6 +231,7 @@ mod imp {
         let (nal_tx, nal_rx) = bounded::<Vec<u8>>(4);
 
         let viewer_video_addr = format!("{viewer_ip}:{viewer_udp_port}");
+        info!("Video target UDP {viewer_video_addr}");
         let (w, h) = (width as usize, height as usize);
 
         // Encoder thread
@@ -265,11 +266,16 @@ mod imp {
                     .expect("connect UDP sender");
                 let mut frame_id: u32 = 0;
                 let t0 = Instant::now();
+                let mut logged_first_frame = false;
                 let mut pkt_buf = Vec::with_capacity(VIDEO_CHUNK_MAX + crate::proto::VIDEO_HDR_LEN);
 
                 while let Ok(nal) = nal_rx.recv() {
                     let chunks: Vec<&[u8]> = nal.chunks(VIDEO_CHUNK_MAX).collect();
                     let total = chunks.len() as u16;
+                    if !logged_first_frame {
+                        info!("Sending first video frame: {} bytes in {} UDP chunks to {}", nal.len(), total, viewer_video_addr);
+                        logged_first_frame = true;
+                    }
                     let pts_ms = t0.elapsed().as_millis() as u32;
 
                     for (idx, chunk) in chunks.iter().enumerate() {
