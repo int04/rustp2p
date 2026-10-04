@@ -317,6 +317,7 @@ struct HardwareVideoDecoder {
     timestamp: i64,
     timestamp_step: i64,
     last_outcome: String,
+    logged_first_output: bool,
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -349,6 +350,7 @@ impl HardwareVideoDecoder {
             timestamp: 0,
             timestamp_step,
             last_outcome: "initialized".to_string(),
+            logged_first_output: false,
         })
     }
 
@@ -377,6 +379,10 @@ impl HardwareVideoDecoder {
         let Some(frame) = self.dec.latest_frame() else {
             return Ok(None);
         };
+        if !self.logged_first_output {
+            tracing::info!("GPU decoder produced first decoded frame");
+            self.logged_first_output = true;
+        }
 
         hardware_frame_to_rgba(&self.dec, frame.surface)
     }
