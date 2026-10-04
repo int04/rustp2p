@@ -184,9 +184,18 @@ impl VideoToolboxEncoder {
             }
         }
 
+        use videotoolbox::compression::FrameProperties;
+
+        // Force a clean IDR at session start and roughly once per second so a
+        // late-joining or packet-loss-recovering hardware decoder can resync.
+        let force_keyframe = self.frame_index % i64::from(self.fps.max(1)) == 0;
         let encoded = self
             .session
-            .encode(&self.surface, CMTime::new(self.frame_index, self.fps as i32))
+            .encode_with_properties(
+                &self.surface,
+                CMTime::new(self.frame_index, self.fps as i32),
+                FrameProperties::new().with_force_key_frame(force_keyframe),
+            )
             .context("VideoToolbox H.264 encode")?;
         self.frame_index = self.frame_index.wrapping_add(1);
 
