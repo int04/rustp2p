@@ -129,7 +129,11 @@ pub fn spawn_threads(
                         break;
                     }
                     match nal_rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(nal) => match decoder.decode(&nal) {
+                        Ok(nal) => {
+                            *status2.lock().unwrap() =
+                                format!("{} decoder · received {} bytes…", backend.label(), nal.len());
+                            ctx2.request_repaint();
+                            match decoder.decode(&nal) {
                             Ok(Some((data, w, h))) => {
                                 *status2.lock().unwrap() = format!("Streaming · {} decoder", backend.label());
                                 frame_tx2
@@ -145,6 +149,7 @@ pub fn spawn_threads(
                                 if let Some(detail) = decoder.backend_status() {
                                     *status2.lock().unwrap() =
                                         format!("GPU decoder · {detail} · waiting for frame…");
+                                    ctx2.request_repaint();
                                 }
                             }
                             Err(e) => {
@@ -152,7 +157,8 @@ pub fn spawn_threads(
                                 *status2.lock().unwrap() = msg.clone();
                                 warn!("{msg}");
                             }
-                        },
+                            }
+                        }
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                         Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                     }
