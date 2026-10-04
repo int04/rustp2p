@@ -306,8 +306,19 @@ impl HardwareVideoDecoder {
             low_latency: true,
             require_hardware: true,
         };
+        use openipc_video::{VideoCodec, VideoDecoder as _};
+
         let dec = openipc_video::PlatformDecoder::new(options)
             .context("create hardware H.264 decoder")?;
+        let caps = dec.capabilities();
+        let h264 = caps.codec(VideoCodec::H264)
+            .ok_or_else(|| anyhow::anyhow!("hardware decoder reports no H.264 capability"))?;
+        if !h264.supported {
+            bail!("hardware H.264 decoder is not supported by the selected GPU adapter");
+        }
+        if !h264.hardware_accelerated {
+            bail!("H.264 decode is available but not hardware accelerated on the selected GPU adapter");
+        }
         let timestamp_step = (90_000_i64 / i64::from(fps.max(1))).max(1);
         Ok(Self {
             dec,

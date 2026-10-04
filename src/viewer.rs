@@ -85,6 +85,10 @@ pub fn spawn_threads(
             .spawn(move || udp_receiver(udp_sock, cipher, nal_tx, stop))?;
     }
 
+    // Initialize the decoder synchronously so GPU capability errors are
+    // reported to the GUI instead of leaving a viewer window stuck on "Connecting…".
+    let mut decoder = VideoDecoder::new(backend, fps).context("initialize video decoder")?;
+
     // Decoder thread
     {
         let stop = stop.clone();
@@ -93,19 +97,12 @@ pub fn spawn_threads(
         std::thread::Builder::new()
             .name("decoder".into())
             .spawn(move || {
-                let mut dec = match VideoDecoder::new(backend, fps) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        error!("Decoder init: {e:#}");
-                        return;
-                    }
-                };
                 loop {
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
                     match nal_rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(nal) => match dec.decode(&nal) {
+                        Ok(nal) => match decoder.decode(&nal) {
                             Ok(Some((data, w, h))) => {
                                 frame_tx2
                                     .try_send(RgbaFrame {
