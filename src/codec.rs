@@ -347,7 +347,11 @@ impl HardwareVideoDecoder {
         let outcome = self.dec
             .submit(access)
             .context("hardware H.264 decode submit")?;
-        self.last_outcome = format!("{outcome:?}");
+        let outcome_text = format!("{outcome:?}");
+        if outcome_text != self.last_outcome {
+            tracing::warn!("GPU decoder submit outcome: {outcome_text}");
+            self.last_outcome = outcome_text;
+        }
 
         let Some(frame) = self.dec.latest_frame() else {
             return Ok(None);
