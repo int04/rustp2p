@@ -46,6 +46,7 @@ eframe = "0.34"
 
 # Fast inter-thread channels
 crossbeam-channel = "0.5"
+socket2 = "0.5"
 
 # Encryption: password KDF + AEAD for control channel and video stream
 argon2 = "0.5"

@@ -270,6 +270,12 @@ mod imp {
             .name("udp-sender".into())
             .spawn(move || {
                 let sock = UdpSocket::bind("0.0.0.0:0").expect("bind UDP sender");
+                let sock_ref = socket2::SockRef::from(&sock);
+                if let Err(e) = sock_ref.set_send_buffer_size(8 * 1024 * 1024) {
+                    warn!("Could not increase UDP send buffer: {e}");
+                } else if let Ok(bytes) = sock_ref.send_buffer_size() {
+                    info!("UDP send buffer: {bytes} bytes");
+                }
                 sock.connect(&viewer_video_addr)
                     .expect("connect UDP sender");
                 let mut frame_id: u32 = 0;

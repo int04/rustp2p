@@ -50,6 +50,18 @@ pub fn spawn_threads(
     // Bind our UDP video socket first so we can tell the host which port to stream
     // to (per-connection, so one viewer can receive from multiple hosts at once).
     let udp_sock = UdpSocket::bind("0.0.0.0:0").context("bind UDP video socket")?;
+    // High-FPS H.264 frames arrive as large bursts of many ~1300-byte datagrams.
+    // The Windows default SO_RCVBUF is too small for 90+ FPS keyframes and caused
+    // partial frames to be discarded before the decoder ever saw them.
+    {
+        let sock_ref = socket2::SockRef::from(&udp_sock);
+        sock_ref
+            .set_recv_buffer_size(8 * 1024 * 1024)
+            .context("increase UDP receive buffer")?;
+        if let Ok(bytes) = sock_ref.recv_buffer_size() {
+            info!("UDP receive buffer: {bytes} bytes");
+        }
+    }
     let udp_port = udp_sock.local_addr().context("UDP local addr")?.port();
 
     // Encryption handshake: read the host's salt, derive the shared key.
