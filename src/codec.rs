@@ -343,7 +343,13 @@ impl HardwareVideoDecoder {
         let timestamp = VideoTimestamp::new(self.timestamp, 90_000)
             .ok_or_else(|| anyhow::anyhow!("invalid hardware decoder timestamp"))?;
         self.timestamp = self.timestamp.wrapping_add(self.timestamp_step);
-        let access = EncodedAccessUnit::new(VideoCodec::H264, nal.to_vec(), timestamp, false);
+        let is_keyframe = h264_contains_idr(nal);
+        let access = EncodedAccessUnit::new(
+            VideoCodec::H264,
+            nal.to_vec(),
+            timestamp,
+            is_keyframe,
+        );
         let outcome = self.dec
             .submit(access)
             .context("hardware H.264 decode submit")?;
@@ -359,6 +365,28 @@ impl HardwareVideoDecoder {
 
         hardware_frame_to_rgba(&self.dec, frame.surface)
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn h264_contains_idr(data: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i + 4 <= data.len() {
+        let (start, prefix_len) = if data[i..].starts_with(&[0, 0, 0, 1]) {
+            (i, 4)
+        } else if data[i..].starts_with(&[0, 0, 1]) {
+            (i, 3)
+        } else {
+            i += 1;
+            continue;
+        };
+
+        let nal_pos = start + prefix_len;
+        if nal_pos < data.len() && (data[nal_pos] & 0x1f) == 5 {
+            return true;
+        }
+        i = nal_pos.saturating_add(1);
+    }
+    false
 }
 
 #[cfg(target_os = "macos")]
